@@ -155,7 +155,9 @@ def ensure_topic_and_permissions():
 
 def subscribe_to_meeting_space(meet_creds, space_id, topic_path):
     workspace_service = build('workspaceevents', 'v1', credentials=meet_creds)
+    sub_name = f"subscriptions/meet-sub-{space_id.replace('/', '-')}"
     body = {
+        "name": sub_name,
         "targetResource": f"//meet.googleapis.com/{space_id}",
         "eventTypes": [
             "google.workspace.meet.participant.v2.joined",
@@ -165,19 +167,47 @@ def subscribe_to_meeting_space(meet_creds, space_id, topic_path):
             "pubsub_topic": topic_path
         },
         "payload_options": {
-            "include_resource": False
+            "include_resource": True
         }
     }
     try:
         sub = workspace_service.subscriptions().create(body=body).execute()
-        logger.info(f"Created subscription: {sub['name']}")
-        return sub['name']
+        logger.info("Created Workspace Events subscription: %s", sub["name"])
+        return sub["name"]
     except HttpError as e:
         if e.resp.status == 409 and "SUBSCRIPTION_ALREADY_EXISTS" in str(e):
-            logger.info(f"Already subscribed to {space_id}")
-            return None
-        logger.warning(f"Error creating subscription for {space_id}: {e}")
+            logger.info("Workspace Events subscription already exists: %s", sub_name)
+            return sub_name
+        logger.warning("Error creating Workspace Events subscription: %s", e)
         return None
+
+def print_workspace_event_subscriptions(creds):
+    logger.info("Listing current Workspace Events API subscriptions...")
+    service = build("workspaceevents", "v1", credentials=creds)
+
+    try:
+        response = service.subscriptions().list().execute()
+        subs = response.get("subscriptions", [])
+        if not subs:
+            logger.info("No active Workspace Events subscriptions found.")
+            return
+
+        for sub in subs:
+            name = sub.get("name")
+            target = sub.get("targetResource")
+            event_types = sub.get("eventTypes", [])
+            topic = sub.get("notificationEndpoint", {}).get("pubsubTopic")
+            include_resource = sub.get("payloadOptions", {}).get("includeResource", False)
+
+            logger.info("Subscription: %s", name)
+            logger.info("  Target: %s", target)
+            logger.info("  Topic: %s", topic)
+            logger.info("  Event Types: %s", event_types)
+            logger.info("  include_resource: %s", include_resource)
+
+    except Exception as e:
+        logger.error("Failed to list subscriptions: %s", e)
+
 
 def start_pubsub_listener(subscription_path, meetings):
     sa_creds = service_account.Credentials.from_service_account_file(SA_FILE)
@@ -214,6 +244,8 @@ def start_pubsub_listener(subscription_path, meetings):
     subscriber.subscribe(subscription_path, callback=callback)
 
 
+from google.auth.transport.requests import AuthorizedSession
+
 def play_alert():
     logger.warning("⚠️ Conference room has not joined a live meeting!")
     subprocess.call(["afplay", MP3_FILE])  # macOS only; use mpg123 or aplay on Linux
@@ -230,12 +262,16 @@ if __name__ == "__main__":
     with open("notifier_config.json") as f:
         config = json.load(f)
 
+    meet_creds = get_meet_creds(args.sa_creds)
+    cleanup_workspace_events_subscriptions(meet_creds)
+
     meetings = defaultdict(dict)
     topic_path = ensure_topic_and_permissions()
     subscription_path = f"projects/{PROJECT_ID}/subscriptions/{TOPIC_ID}-sub"
     start_pubsub_listener(subscription_path, meetings)
-
     calendar_creds = service_account.Credentials.from_service_account_file(SA_FILE, scopes=SCOPES)
+    print_workspace_event_subscriptions(meet_creds)
+
 
     while True:
         logger.info("loop again")
@@ -255,7 +291,7 @@ if __name__ == "__main__":
             try:
                 space = meet_client.get_space(name=f"spaces/{e.conferenceId}")
                 space_id = space.name
-                logger.debug("EVENT: %s space: %s space_id: %s",e,space,space_id)
+                logger.debug("EVENT: %s space_id: %s",e,space_id)
                 meetings[space_id].update({
                     'start': e.start,
                     'end': e.end,
