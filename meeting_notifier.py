@@ -48,11 +48,10 @@ POLLING_INTERVAL_SECONDS = 60
 LOOKBACK_WINDOW_SECONDS = 3600  # Increased for broader testing
 PROCESSED_EVENT_IDS = set()
 
-def get_space_by_conferenceId(creds, conferenceId):
-    """Retrieves the Google Meet space name (ID) using the meeting code."""
+def get_space_by_meeting_code(creds, meeting_code):
     client = meet_v2.SpacesServiceClient(credentials=creds)
     try:
-        space = client.get_space(name=f"spaces/{conferenceId}")
+        space = client.get_space(name=f"spaces/{meeting_code}")
         print(f"Full Resource Name (Meet ID): {space.name}")
         return space.name
     except Exception as e:
@@ -64,21 +63,36 @@ class Event:
         """Create the event object from the dictonary."""
         self.event = event
     def __repr__(self):
-        return f"<Event {self.start()} to {self.end()} - {self.summary()}"
+        return f"<Event {self.start} to {self.end} - {self.summary}"
+    @property
     def conferenceId(self):
-        return self.event['conferenceData']['conferenceId']
+        try:
+            return self.event['conferenceData']['conferenceId']
+        except KeyError:
+            return None
+    @property
     def start(self):
         return self.event['start'].get('dateTime', self.event['start'].get('date'))
+    @property
     def end(self):
         return self.event['end'].get('dateTime', self.event['end'].get('date'))
+    @property
     def summary(self):
         return self.event.get('summary', '(No Title)')
+    @property
     def started(self):
         datetime.fromisoformat(self.start()) <= datetime.now()
+    @property
     def ended(self):
         datetime.fromisoformat(self.end()) <= datetime.now()
+    @property
     def active(self):
         return self.started() and not self.ended()
+    @property
+    def organizer_email(self):
+        return self.event['creator']['email']
+
+
 
 def get_todays_meetings(creds, calendarId, timezone=DEFAULT_TIMEZONE):
     logger.debug("Fetching today's calendar events for %s",calendarId)
@@ -110,18 +124,39 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Notify when the conference room has not joined the meeting",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--sa_creds", action="store_true", help="Use service account creds for meeting API")
     args  = parser.parse_args()
     if args.debug:
         logger.setLevel(logging.DEBUG)
     with open("notifier_config.json","r") as f:
         config = json.load(f)
-    creds = service_account.Credentials.from_service_account_file(SA_FILE)
+    sa_creds = service_account.Credentials.from_service_account_file(SA_FILE, scopes=SCOPES)
 
+    if not args.sa_creds:
+        if os.path.exists(OAUTH2_TOKEN_FILENAME):
+            meet_creds = Credentials.from_authorized_user_file(OAUTH2_TOKEN_FILENAME, SCOPES)
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(OAUTH2_CREDENTIALS_FILENAME, SCOPES)
+            meet_creds = flow.run_local_server(port=0)
+            with open(OAUTH2_TOKEN_FILENAME, 'w') as token:
+                token.write(creds.to_json())
 
     while True:
-        events = get_todays_meetings(creds, config['monitor_calendar_id'])
+        events = get_todays_meetings(sa_creds, config['monitor_calendar_id'])
         for e in events:
-            print(e) # ,get_space_by_conferenceId(creds, e.conferenceId()))
+            print(e)
+            print(e.start,e.end,e.summary,e.conferenceId,e.organizer_email)
+            #
+            # Use this if domain-wide delegation is enabled for this service account:
+            if args.sa_creds:
+                meet_creds = service_account.Credentials.from_service_account_file(SA_FILE, scopes=SCOPES).with_subject(e.organizer_email)
+            # Use this otherwise:
+            meet_client = meet_v2.SpacesServiceClient(credentials=meet_creds)
+            try:
+                space = meet_client.get_space(name=f"spaces/{e.conferenceId}")
+                print(f"Full Resource Name (Meet ID): {space.name}")
+            except Exception as e:
+                print(f"Error retrieving space: {e}")
         # Unsubscribe from every meeting that has been
         exit(0)
 
