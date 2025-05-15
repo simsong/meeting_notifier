@@ -119,6 +119,8 @@ def get_todays_meetings(creds, calendarId, timezone=DEFAULT_TIMEZONE):
     logger.debug("Events fetched: %s",len(events))
     return [Event(e) for e in events]
 
+
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description="Notify when the conference room has not joined the meeting",
@@ -141,7 +143,9 @@ if __name__ == '__main__':
             with open(OAUTH2_TOKEN_FILENAME, 'w') as token:
                 token.write(creds.to_json())
 
+
     while True:
+        # Main thread - get today's events 
         events = get_todays_meetings(sa_creds, config['monitor_calendar_id'])
         for e in events:
             print(e)

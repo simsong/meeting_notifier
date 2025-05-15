@@ -9,17 +9,37 @@ Inputs:
 * OAuth client token
 
 Theory of operation
+===================
+- This application has a single pub/sub topic named meet-events
+- The pub/sub topic is created by this script if it doesn't exist.
+
+Global data structure:
+- Meetings that have not yet ended
+  - defaultdict(dict) indexed by meeting space ID (not meeting code, which may be reused)
+  - records meetings that have been joined by conference room
+
+On startup:
+- Verify that the pub/sub topic exists. If not, create it.
+- Set the message retention and ack deadlines on subscriptions to 10 seconds.
+- Register a listener for events from the topic.
+
+For every event that arrives:
+- If it is for a person or meeting room joining or leaving the conference room we are monitoring, print that.
+- If the conference room has joined the meeting, note that in the list of meetings that have not yet ended.
+- Does not record if the conference room leaves.
 
 Every minute:
-- Get a list of all today's meetings.
+- Get a list of all today's meetings that have not ended.
   - Build a datas structure with the start and end times of each of the room's meetings.
-- Subscribe to events for every meeting to which we have not yet subscribed
-- Unsubscribe to events that we are subscribed to that are not today.
-- If the meeting is happening and the room is not in it, ring the bell.
+  - Remove from the list all meetings that have not yet ended.
+- Get a list of all current subscriptions to the topic.
+  - Delete each unless in the list of meetings that have not yet ended.
+- Create new subscriptions for every meeting in the list of meetings that have not yet ended for which there is not yet a subscription.
+- If there is a meeting that has STARTED but has not ENDED and the conference room has not yet joined:
+  - Print an alert
+  - Play an MP3
 
-Event processing:
-- Display the event
-- If the event is for this room, update if the room is in or out of the meeting
+
 
 
 Setup
@@ -31,3 +51,7 @@ Either:
   1. Give the service account domain-wide-delegation
 or:
   2. Authenticate as a user who has access.
+
+
+Maintenance
+==========
