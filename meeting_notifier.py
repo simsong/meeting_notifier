@@ -6,6 +6,11 @@ import time
 import logging
 import subprocess
 from collections import defaultdict
+import atexit
+import uuid
+import select
+import termios
+import tty
 
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta, timezone
@@ -18,7 +23,6 @@ from google.oauth2 import service_account
 from google.cloud import pubsub_v1
 from google.apps import meet_v2
 from googleapiclient.errors import HttpError
-from google.cloud import pubsub_v1
 from google.iam.v1 import policy_pb2
 
 
@@ -71,12 +75,10 @@ def get_meet_creds(use_sa=False, organizer=None):
             return oauth_flow()
 
     except RefreshError as e:
-        if 'invalid_scope' in str(e).lower():
-            logger.warning("OAuth2 token is invalid or missing required scopes. Re-authenticating...")
+        logger.warning("OAuth2 token refresh failed. Re-authenticating via browser...")
+        if os.path.exists(OAUTH2_TOKEN_FILENAME):
             os.remove(OAUTH2_TOKEN_FILENAME)
-            return oauth_flow()
-        else:
-            raise
+        return oauth_flow()
 
 class Event:
     def __init__(self, event):
@@ -165,9 +167,6 @@ def subscribe_to_meeting_space(meet_creds, space_id, topic_path):
         ],
         "notification_endpoint": {
             "pubsub_topic": topic_path
-        },
-        "payload_options": {
-            "include_resource": True
         }
     }
     try:
@@ -218,6 +217,7 @@ def start_pubsub_listener(subscription_path, meetings):
         try:
             data = json.loads(message.data.decode("utf-8"))
             logger.info(f"Received event: {json.dumps(data, indent=2)}")
+            logger.debug(f"Full event payload: {json.dumps(data, indent=2)}")
             space_id = data.get("space", "")
             participant = data.get("participant", {})
             participant_email = participant.get("emailAddress", "")
@@ -250,6 +250,105 @@ def play_alert():
     logger.warning("⚠️ Conference room has not joined a live meeting!")
     subprocess.call(["afplay", MP3_FILE])  # macOS only; use mpg123 or aplay on Linux
 
+def create_topic_and_configure(unique_topic_id):
+    sa_creds = service_account.Credentials.from_service_account_file(SA_FILE)
+    publisher = pubsub_v1.PublisherClient(credentials=sa_creds)
+    topic_path = publisher.topic_path(PROJECT_ID, unique_topic_id)
+    try:
+        publisher.create_topic(request={"name": topic_path})
+        logger.info(f"Created topic: {topic_path}")
+    except Exception as e:
+        logger.error(f"Error creating topic: {e}")
+        raise
+    # Set IAM policy
+    policy = publisher.get_iam_policy(request={"resource": topic_path})
+    role = "roles/pubsub.publisher"
+    member = "serviceAccount:meet-api-event-push@system.gserviceaccount.com"
+    already_bound = any(
+        b.role == role and member in b.members for b in policy.bindings
+    )
+    if not already_bound:
+        policy.bindings.append(policy_pb2.Binding(role=role, members=[member]))
+        publisher.set_iam_policy(request={"resource": topic_path, "policy": policy})
+        logger.info("Granted meet-api-event-push permission on topic")
+    return topic_path, publisher
+
+def delete_topic_on_exit(topic_path, publisher):
+    def _delete():
+        try:
+            publisher.delete_topic(request={"topic": topic_path})
+            logger.info(f"Deleted topic on exit: {topic_path}")
+        except Exception as e:
+            logger.warning(f"Failed to delete topic on exit: {e}")
+    return _delete
+
+def key_pressed():
+    dr, dw, de = select.select([sys.stdin], [], [], 0)
+    if dr:
+        return sys.stdin.read(1)
+    return None
+
+def do_work(meetings, config, calendar_creds, args, topic_path):
+    logger.info("loop again")
+    events = get_todays_meetings(calendar_creds, config['monitor_calendar_id'])
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    active = []
+
+    for e in events:
+        if not e.conferenceId:
+            logger.debug("EVENT: %s no conferenceId", e)
+            continue
+        if e.ended:
+            logger.debug("EVENT: %s has already ended", e)
+            continue
+        meet_creds = get_meet_creds(args.sa_creds, e.organizer_email if args.sa_creds else None)
+        meet_client = meet_v2.SpacesServiceClient(credentials=meet_creds)
+        try:
+            space = meet_client.get_space(name=f"spaces/{e.conferenceId}")
+            space_id = space.name
+            logger.debug("EVENT: %s space_id: %s", e, space_id)
+            meetings[space_id].update({
+                'start': e.start,
+                'end': e.end,
+                'joined': False,
+                'summary': e.summary
+            })
+            if 'subscription' not in meetings[space_id]:
+                meetings[space_id]['subscription'] = subscribe_to_meeting_space(meet_creds, space_id, topic_path)
+            active.append(space_id)
+        except Exception as err:
+            logger.error(f"Error retrieving space for {e.conferenceId}: {err}")
+
+    # Remove inactive meetings
+    inactive = set(meetings.keys()) - set(active)
+    for sid in inactive:
+        logger.debug(f"Removing expired meeting: {sid}")
+        meetings.pop(sid)
+
+    # Detect live meetings without room joined
+    for sid, meta in meetings.items():
+        if meta['start'] < now < meta['end'] and not meta['joined']:
+            play_alert()
+
+def main_loop(meetings, config, calendar_creds, args, topic_path):
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while True:
+            do_work(meetings, config, calendar_creds, args, topic_path)
+            print('\r\033[7mtype q to exit\033[0m', end='', flush=True)
+            for _ in range(5):
+                key = key_pressed()
+                if key and key.lower() == 'q':
+                    print("\nExiting on 'q' keypress.")
+                    return
+                time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nExiting on keyboard interrupt.")
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
@@ -263,56 +362,16 @@ if __name__ == "__main__":
         config = json.load(f)
 
     meet_creds = get_meet_creds(args.sa_creds)
-    cleanup_workspace_events_subscriptions(meet_creds)
-
     meetings = defaultdict(dict)
-    topic_path = ensure_topic_and_permissions()
-    subscription_path = f"projects/{PROJECT_ID}/subscriptions/{TOPIC_ID}-sub"
+
+    topic_suffix = datetime.now().strftime("%Y%m%d%H%M%S")
+    unique_topic_id = f"meet-events-{topic_suffix}"
+
+    topic_path, publisher = create_topic_and_configure(unique_topic_id)
+    atexit.register(delete_topic_on_exit(topic_path, publisher))
+
+    subscription_path = f"projects/{PROJECT_ID}/subscriptions/{unique_topic_id}-sub"
     start_pubsub_listener(subscription_path, meetings)
     calendar_creds = service_account.Credentials.from_service_account_file(SA_FILE, scopes=SCOPES)
-    print_workspace_event_subscriptions(meet_creds)
 
-
-    while True:
-        logger.info("loop again")
-        events = get_todays_meetings(calendar_creds, config['monitor_calendar_id'])
-        now = datetime.utcnow().isoformat() + "Z"
-        active = []
-
-        for e in events:
-            if not e.conferenceId:
-                logger.debug("EVENT: %s no conferenceId",e)
-                continue
-            if e.ended:
-                logger.debug("EVENT: %s has already ended",e)
-                continue
-            meet_creds = get_meet_creds(args.sa_creds, e.organizer_email if args.sa_creds else None)
-            meet_client = meet_v2.SpacesServiceClient(credentials=meet_creds)
-            try:
-                space = meet_client.get_space(name=f"spaces/{e.conferenceId}")
-                space_id = space.name
-                logger.debug("EVENT: %s space_id: %s",e,space_id)
-                meetings[space_id].update({
-                    'start': e.start,
-                    'end': e.end,
-                    'joined': False,
-                    'summary': e.summary
-                })
-                if 'subscription' not in meetings[space_id]:
-                    meetings[space_id]['subscription'] = subscribe_to_meeting_space(meet_creds, space_id, topic_path)
-                active.append(space_id)
-            except Exception as err:
-                logger.error(f"Error retrieving space for {e.conferenceId}: {err}")
-
-        # Remove inactive meetings
-        inactive = set(meetings.keys()) - set(active)
-        for sid in inactive:
-            logger.debug(f"Removing expired meeting: {sid}")
-            meetings.pop(sid)
-
-        # Detect live meetings without room joined
-        for sid, meta in meetings.items():
-            if meta['start'] < now < meta['end'] and not meta['joined']:
-                play_alert()
-
-        time.sleep(5)
+    main_loop(meetings, config, calendar_creds, args, topic_path)
