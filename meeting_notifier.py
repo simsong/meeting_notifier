@@ -1,3 +1,10 @@
+"""
+This google guide claims to work:
+https://developers.google.com/workspace/meet/api/guides/tutorial-events-python
+"""
+
+
+
 import json
 import os
 import sys
@@ -24,6 +31,7 @@ from google.iam.v1 import policy_pb2
 TOPIC_ID = "meet-events"
 PROJECT_ID = "meeting-notifier-412417"
 ROOM_EMAIL = "c_188fmt6m2v6sahkjhd0kvdtkh12q6@resource.calendar.google.com"
+FILTER_EMAIL = 'simsong@basistech.comx'
 MP3_FILE = "alert.mp3"
 RETENTION_SECONDS = 60
 
@@ -155,13 +163,16 @@ def subscribe_to_meeting_space(meet_creds, space_id, topic_path):
         "eventTypes": [
             "google.workspace.meet.participant.v2.joined",
             "google.workspace.meet.participant.v2.left",
+            "google.workspace.meet.conference.v2.started",
+            "google.workspace.meet.conference.v2.ended",
         ],
-        "notification_endpoint": {
+        "payloadOptions": {
+            "includeResource": True,
+        },
+        "notificationEndpoint": {
             "pubsub_topic": topic_path
         },
-        "payload_options": {
-            "include_resource": True
-        }
+        "ttl" : "86400s",
     }
     try:
         sub = workspace_service.subscriptions().create(body=body).execute()
