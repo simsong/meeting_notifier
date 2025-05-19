@@ -1,6 +1,24 @@
 """
-This google guide claims to work:
+I have spent about 20 hours creating a program that does everything described below. It all works! However, the events that I am receiving look like this:
+
+2025-05-15 21:38:36,179 - INFO - Received event: {
+  "participantSession": {
+    "name": "conferenceRecords/de0f04e5-04d5-4c57-8cd8-afe589a190aa/participants/105103249624144546282/participantSessions/389"
+  }
+}
+2025-05-15 21:38:37,395 - INFO - loop again
+2025-05-15 21:38:37,399 - INFO - file_cache is only supported with oauth2client<4.0.0
+2025-05-15 21:38:39,994 - INFO - Received event: {
+  "participantSession": {
+    "name": "conferenceRecords/de0f04e5-04d5-4c57-8cd8-afe589a190aa/participants/105103249624144546282/participantSessions/389"
+  }
+}
+
+There is no information about who is joining or leaving. Google's sample program here says that such details are provided:
 https://developers.google.com/workspace/meet/api/guides/tutorial-events-python
+
+However, Google's documentation here says that the details are not provided:
+https://developers.google.com/workspace/events/guides/events-meet
 """
 
 

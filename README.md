@@ -4,14 +4,25 @@ Alerts people in the conference room that they haven't joined the Google Meet.
 
 This program watches the Google Calendar for the conference room and subscribes to the events for each meeting. If the meeting starts but the room hasn't joined, the program alerts the room's occupants by playing a tone on the speaker.
 
-Inputs:
+Mandatory Inputs:
 * Google Service Account (credentials in service_account.json)
-* OAuth client token
+  - The room's google calendar must have been shared with the service account.
+* The CalendarID to monitor
+
+One of these:
+* Either the Google Service Account can pose as the meeting owner (really, everyone in the domain)
+* Or OAuth authentication to a real user account. (This is great for testing, but the token needs to be periodically renewed, so it won't work for a deployment.)
+
+Outputs:
+* Currently, the program prints all meeting events on stdout.
+* Unfortunately, currently there is no detail on the events to detemrine what is happening and why.
 
 Theory of operation
 ===================
-- This application has a single pub/sub topic named meet-events
-- The pub/sub topic is created by this script if it doesn't exist.
+- This application creates a pub/sub topic
+- The application subscribes to events for the meeting.
+- The application prints events as they happen
+
 
 Global data structure:
 - Meetings that have not yet ended
@@ -40,18 +51,29 @@ Every minute:
   - Play an MP3
 
 
-
-
-Setup
-=====
-- Create a service account
-- Share the meeting room calendar with the service account
-
-Either:
-  1. Give the service account domain-wide-delegation
-or:
-  2. Authenticate as a user who has access.
-
-
-Maintenance
+Problems
 ==========
+Currently, due to an apparent bug in Google Meet, not enough detail is printed on the events to know what is going on.
+
+I have spent about 20 hours creating a program that does everything described below. It all works! However, the events that I am receiving look like this:
+
+```
+2025-05-15 21:38:36,179 - INFO - Received event: {
+  "participantSession": {
+    "name": "conferenceRecords/de0f04e5-04d5-4c57-8cd8-afe589a190aa/participants/105103249624144546282/participantSessions/389"
+  }
+}
+2025-05-15 21:38:37,395 - INFO - loop again
+2025-05-15 21:38:37,399 - INFO - file_cache is only supported with oauth2client<4.0.0
+2025-05-15 21:38:39,994 - INFO - Received event: {
+  "participantSession": {
+    "name": "conferenceRecords/de0f04e5-04d5-4c57-8cd8-afe589a190aa/participants/105103249624144546282/participantSessions/389"
+  }
+}
+```
+
+There is no information about who is joining or leaving. Google's sample program here says that such details are provided:
+https://developers.google.com/workspace/meet/api/guides/tutorial-events-python
+
+However, Google's documentation here says that the details are not provided:
+https://developers.google.com/workspace/events/guides/events-meet
