@@ -1,28 +1,3 @@
-"""
-I have spent about 20 hours creating a program that does everything described below. It all works! However, the events that I am receiving look like this:
-
-2025-05-15 21:38:36,179 - INFO - Received event: {
-  "participantSession": {
-    "name": "conferenceRecords/de0f04e5-04d5-4c57-8cd8-afe589a190aa/participants/105103249624144546282/participantSessions/389"
-  }
-}
-2025-05-15 21:38:37,395 - INFO - loop again
-2025-05-15 21:38:37,399 - INFO - file_cache is only supported with oauth2client<4.0.0
-2025-05-15 21:38:39,994 - INFO - Received event: {
-  "participantSession": {
-    "name": "conferenceRecords/de0f04e5-04d5-4c57-8cd8-afe589a190aa/participants/105103249624144546282/participantSessions/389"
-  }
-}
-
-There is no information about who is joining or leaving. Google's sample program here says that such details are provided:
-https://developers.google.com/workspace/meet/api/guides/tutorial-events-python
-
-However, Google's documentation here says that the details are not provided:
-https://developers.google.com/workspace/events/guides/events-meet
-"""
-
-
-
 import json
 import os
 import sys
@@ -30,6 +5,7 @@ import datetime
 import time
 import logging
 import subprocess
+import signal
 from collections import defaultdict
 
 from googleapiclient.discovery import build
@@ -46,12 +22,11 @@ from google.api_core.exceptions import AlreadyExists
 from google.iam.v1 import policy_pb2
 
 # Constants
-TOPIC_ID = "meet-events-10"
+TOPIC_ID = f"meet-events-{int(time.time())}"
 PROJECT_ID = "meeting-notifier-412417"
 ROOM_EMAIL = "c_188fmt6m2v6sahkjhd0kvdtkh12q6@resource.calendar.google.com"
-FILTER_EMAIL = 'simsong@basistech.comx'
+FILTER_EMAIL = "simsong@basistech.com"
 MP3_FILE = "alert.mp3"
-RETENTION_SECONDS = 60
 
 # Logging
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -130,11 +105,10 @@ def ensure_topic_and_permissions():
     topic_path = publisher.topic_path(PROJECT_ID, TOPIC_ID)
 
     try:
-        publisher.get_topic(request={"topic": topic_path})
-        logger.info(f"Using existing topic: {topic_path}")
-    except Exception:
         publisher.create_topic(request={"name": topic_path})
         logger.info(f"Created topic: {topic_path}")
+    except AlreadyExists:
+        logger.info(f"Using existing topic: {topic_path}")
 
     policy = publisher.get_iam_policy(request={"resource": topic_path})
     role = "roles/pubsub.publisher"
@@ -168,9 +142,10 @@ def start_pubsub_listener(subscription_path, meetings):
 
             message.ack()
         except Exception as e:
-            logger.error(f"PubSub message handling error: {e}")
+            logger.error("PubSub message handling error: %s", e)
             message.nack()
 
+    subscriber.create_subscription(request={"name": subscription_path, "topic": ensure_topic_and_permissions()})
     subscriber.subscribe(subscription_path, callback=callback)
     logger.info(f"Subscribing to Pub/Sub on {subscription_path}")
 
@@ -181,16 +156,16 @@ def subscribe_to_meeting_space(meet_creds, space_id, topic_path):
         "eventTypes": [
             "google.workspace.meet.participant.v2.joined",
             "google.workspace.meet.participant.v2.left",
-            "google.workspace.meet.conference.v2.started",
-            "google.workspace.meet.conference.v2.ended",
         ],
-        "payloadOptions": {
-            "includeResource": True,
-        },
-        "notificationEndpoint": {
+        "notification_endpoint": {
             "pubsub_topic": topic_path
         },
-        "ttl" : "86400s",
+        "payload_options": {
+            "include_resource": True
+        },
+        "filter": {
+            "participant.emailAddress": FILTER_EMAIL
+        }
     }
     try:
         sub = workspace_service.subscriptions().create(body=body).execute()
@@ -204,6 +179,16 @@ def play_alert():
     logger.warning("\u26a0\ufe0f Conference room has not joined a live meeting!")
     subprocess.call(["afplay", MP3_FILE])
 
+def cleanup_resources():
+    sa_creds = service_account.Credentials.from_service_account_file(SA_FILE)
+    publisher = pubsub_v1.PublisherClient(credentials=sa_creds)
+    topic_path = publisher.topic_path(PROJECT_ID, TOPIC_ID)
+    try:
+        publisher.delete_topic(request={"topic": topic_path})
+        logger.info(f"Deleted topic: {topic_path}")
+    except Exception as e:
+        logger.warning("Failed to delete topic: %s", e)
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
@@ -216,10 +201,18 @@ if __name__ == "__main__":
     with open("notifier_config.json") as f:
         config = json.load(f)
 
+    meetings = defaultdict(dict)
     topic_path = ensure_topic_and_permissions()
     subscription_path = f"projects/{PROJECT_ID}/subscriptions/{TOPIC_ID}-sub"
-    meetings = defaultdict(dict)
     start_pubsub_listener(subscription_path, meetings)
+
+    def shutdown_handler(sig, frame):
+        logger.info("Shutting down, cleaning up resources...")
+        cleanup_resources()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
 
     calendar_creds = service_account.Credentials.from_service_account_file(SA_FILE, scopes=SCOPES)
 

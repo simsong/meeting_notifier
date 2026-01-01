@@ -1,28 +1,3 @@
-"""
-I have spent about 20 hours creating a program that does everything described below. It all works! However, the events that I am receiving look like this:
-
-2025-05-15 21:38:36,179 - INFO - Received event: {
-  "participantSession": {
-    "name": "conferenceRecords/de0f04e5-04d5-4c57-8cd8-afe589a190aa/participants/105103249624144546282/participantSessions/389"
-  }
-}
-2025-05-15 21:38:37,395 - INFO - loop again
-2025-05-15 21:38:37,399 - INFO - file_cache is only supported with oauth2client<4.0.0
-2025-05-15 21:38:39,994 - INFO - Received event: {
-  "participantSession": {
-    "name": "conferenceRecords/de0f04e5-04d5-4c57-8cd8-afe589a190aa/participants/105103249624144546282/participantSessions/389"
-  }
-}
-
-There is no information about who is joining or leaving. Google's sample program here says that such details are provided:
-https://developers.google.com/workspace/meet/api/guides/tutorial-events-python
-
-However, Google's documentation here says that the details are not provided:
-https://developers.google.com/workspace/events/guides/events-meet
-"""
-
-
-
 import json
 import os
 import sys
@@ -46,10 +21,9 @@ from google.api_core.exceptions import AlreadyExists
 from google.iam.v1 import policy_pb2
 
 # Constants
-TOPIC_ID = "meet-events-10"
+TOPIC_ID = "meet-events"
 PROJECT_ID = "meeting-notifier-412417"
 ROOM_EMAIL = "c_188fmt6m2v6sahkjhd0kvdtkh12q6@resource.calendar.google.com"
-FILTER_EMAIL = 'simsong@basistech.comx'
 MP3_FILE = "alert.mp3"
 RETENTION_SECONDS = 60
 
@@ -149,31 +123,6 @@ def ensure_topic_and_permissions():
 
     return topic_path
 
-def start_pubsub_listener(subscription_path, meetings):
-    sa_creds = service_account.Credentials.from_service_account_file(SA_FILE)
-    subscriber = pubsub_v1.SubscriberClient(credentials=sa_creds)
-
-    def callback(message):
-        try:
-            data = json.loads(message.data.decode("utf-8"))
-            logger.info(f"Received event: {json.dumps(data, indent=2)}")
-            space_id = data.get("space", "")
-            participant = data.get("participant", {})
-            participant_email = participant.get("emailAddress", "")
-            event_type = data.get("eventType", "")
-
-            if (event_type.endswith("joined") and space_id in meetings and participant_email.lower() == ROOM_EMAIL.lower()):
-                logger.info(f"✅ Room joined meeting: {space_id}")
-                meetings[space_id]["joined"] = True
-
-            message.ack()
-        except Exception as e:
-            logger.error(f"PubSub message handling error: {e}")
-            message.nack()
-
-    subscriber.subscribe(subscription_path, callback=callback)
-    logger.info(f"Subscribing to Pub/Sub on {subscription_path}")
-
 def subscribe_to_meeting_space(meet_creds, space_id, topic_path):
     workspace_service = build('workspaceevents', 'v1', credentials=meet_creds)
     body = {
@@ -181,16 +130,10 @@ def subscribe_to_meeting_space(meet_creds, space_id, topic_path):
         "eventTypes": [
             "google.workspace.meet.participant.v2.joined",
             "google.workspace.meet.participant.v2.left",
-            "google.workspace.meet.conference.v2.started",
-            "google.workspace.meet.conference.v2.ended",
         ],
-        "payloadOptions": {
-            "includeResource": True,
-        },
-        "notificationEndpoint": {
+        "notification_endpoint": {
             "pubsub_topic": topic_path
-        },
-        "ttl" : "86400s",
+        }
     }
     try:
         sub = workspace_service.subscriptions().create(body=body).execute()
@@ -202,7 +145,7 @@ def subscribe_to_meeting_space(meet_creds, space_id, topic_path):
 
 def play_alert():
     logger.warning("\u26a0\ufe0f Conference room has not joined a live meeting!")
-    subprocess.call(["afplay", MP3_FILE])
+    subprocess.call(["afplay", MP3_FILE])  # macOS only
 
 if __name__ == "__main__":
     import argparse
@@ -217,11 +160,8 @@ if __name__ == "__main__":
         config = json.load(f)
 
     topic_path = ensure_topic_and_permissions()
-    subscription_path = f"projects/{PROJECT_ID}/subscriptions/{TOPIC_ID}-sub"
-    meetings = defaultdict(dict)
-    start_pubsub_listener(subscription_path, meetings)
-
     calendar_creds = service_account.Credentials.from_service_account_file(SA_FILE, scopes=SCOPES)
+    meetings = defaultdict(dict)
 
     while True:
         logger.info("loop again")
@@ -241,7 +181,7 @@ if __name__ == "__main__":
             try:
                 space = meet_client.get_space(name=f"spaces/{e.conferenceId}")
                 space_id = space.name
-                logger.debug("EVENT: %s space_id: %s", e, space_id)
+                logger.debug("EVENT: %s space: %s space_id: %s", e, space, space_id)
                 meetings[space_id].update({
                     'start': e.start,
                     'end': e.end,
@@ -254,11 +194,13 @@ if __name__ == "__main__":
             except Exception as err:
                 logger.error(f"Error retrieving space for {e.conferenceId}: {err}")
 
+        # Remove inactive meetings
         inactive = set(meetings.keys()) - set(active)
         for sid in inactive:
             logger.debug(f"Removing expired meeting: {sid}")
             meetings.pop(sid)
 
+        # Detect live meetings without room joined
         for sid, meta in meetings.items():
             if meta['start'] < now < meta['end'] and not meta['joined']:
                 play_alert()
